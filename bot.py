@@ -12,7 +12,11 @@ import os
 # === ТОКЕН БЕРЁТСЯ ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ (НЕ ВИДЕН НА GITHUB) ===
 TOKEN = os.getenv('TOKEN')
 if not TOKEN:
-    raise ValueError("Токен не найден! Добавь переменную TOKEN в Render.")
+    print("❌ ОШИБКА: Токен не найден в переменной окружения!")
+    print("📌 Добавь переменную TOKEN в Render (вкладка Environment)")
+    exit(1)
+else:
+    print("✅ Токен успешно загружен из переменной окружения (Render)")
 
 # === УСИЛЕННЫЙ АВТОПИНГ (КАЖДЫЕ 5 МИНУТ) ===
 RENDER_URL = "https://anonim-chat-2.onrender.com"
