@@ -7,25 +7,26 @@ import random
 import re
 import requests
 import threading
+import os
 
-TOKEN = "8666576626:AAHFlk3KhsRsmBnd_YjGZ_YsO7YblsA5vw4"
+# === ТОКЕН БЕРЁТСЯ ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ (НЕ ВИДЕН НА GITHUB) ===
+TOKEN = os.getenv('TOKEN')
+if not TOKEN:
+    raise ValueError("Токен не найден! Добавь переменную TOKEN в Render.")
 
 # === УСИЛЕННЫЙ АВТОПИНГ (КАЖДЫЕ 5 МИНУТ) ===
 RENDER_URL = "https://anonim-chat-2.onrender.com"
 
 def keep_alive():
-    """Пинг бота каждые 5 минут, чтобы Render не усыплял"""
     while True:
         try:
             response = requests.get(RENDER_URL, timeout=10)
             print(f"[Пинг] Статус: {response.status_code} в {datetime.now().strftime('%H:%M:%S')}")
         except Exception as e:
             print(f"[Пинг] Ошибка: {e}")
-        time.sleep(300)  # 300 секунд = 5 минут
+        time.sleep(300)
 
-# Запускаем пинг в фоновом потоке
 threading.Thread(target=keep_alive, daemon=True).start()
-# === КОНЕЦ АВТОПИНГА ===
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -34,8 +35,6 @@ users = {}
 waiting_list = []
 chats = {}
 chat_messages = defaultdict(list)
-
-# Игры
 games = {}
 
 # ==============================================
@@ -54,11 +53,6 @@ def gender_emoji(g: str) -> str:
     if g == 'female':
         return '🚺'
     return '⚧'
-
-def age_str(age) -> str:
-    if age is None:
-        return 'скрыт'
-    return str(age)
 
 def partner_info(uid: int) -> str:
     u = users.get(uid, {})
@@ -402,7 +396,6 @@ def forward_message(message: Message):
         "timestamp": time.time()
     })
     try:
-        # ОТПРАВЛЯЕМ С ФОРМАТОМ 💬 Новое сообщение:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 *Новое сообщение:*\n{message.text}", parse_mode='Markdown')
         elif message.content_type == 'photo':
@@ -666,6 +659,6 @@ if __name__ == '__main__':
     print("🔥 DARK CHAT ЗАПУЩЕН! 🔥")
     print("👤 Создатель: Белый Дарон")
     print("📅", datetime.now())
-    print("🎮 Игры, фильтр по полу, возраст – всё внутри!")
     print("🔄 Автопинг активен (каждые 5 минут)")
+    bot.remove_webhook()
     bot.infinity_polling()
