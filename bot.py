@@ -9,77 +9,80 @@ import requests
 import threading
 import os
 
-# === ТОКЕН БЕРЁТСЯ ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ (НЕ ВИДЕН НА GITHUB) ===
-TOKEN = os.getenv('TOKEN')
+# === ТОКЕН ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ ИЛИ ВВОД В ТЕРМУКС ===
+TOKEN = os.getenv("TOKEN")
 if not TOKEN:
-    print("❌ ОШИБКА: Токен не найден в переменной окружения!")
-    print("📌 Добавь переменную TOKEN в Render (вкладка Environment)")
-    exit(1)
-else:
-    print("✅ Токен успешно загружен из переменной окружения (Render)")
+    print("⚠️ Переменная окружения TOKEN не найдена.")
+    TOKEN = input("👉 Введите ваш токен Telegram-бота: ").strip()
+    if not TOKEN:
+        print("❌ Без токена запуск невозможен!")
+        import sys
+        sys.exit(1)
 
-# === УСИЛЕННЫЙ АВТОПИНГ (КАЖДЫЕ 5 МИНУТ) ===
-RENDER_URL = "https://anonim-chat-2.onrender.com"
+# === АВТОПИНГ ДЛЯ RENDER (НЕ ЗАСЫПАЕТ) ===
+RENDER_URL = os.getenv("RENDER_APP_URL", "https://dark-chat.onrender.com")
 
 def keep_alive():
     while True:
         try:
+            # Пингуем как Render, так и сервера Telegram для поддержания сокета
             response = requests.get(RENDER_URL, timeout=10)
             print(f"[Пинг] Статус: {response.status_code} в {datetime.now().strftime('%H:%M:%S')}")
         except Exception as e:
-            print(f"[Пинг] Ошибка: {e}")
-        time.sleep(300)
+            print(f"[Пинг] Ожидание сети... ({e})")
+        time.sleep(120) # Уменьшили интервал до 2 минут для супер-стабильности
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
 bot = telebot.TeleBot(TOKEN)
 
-# Хранилища
+# Хранилища данных
 users = {}
 waiting_list = []
 chats = {}
-chat_messages = defaultdict(list)
 games = {}
 
 # ==============================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================================
 
-def format_timestamp(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
+def init_user(uid, username="Пользователь"):
+    if uid not in users:
+        users[uid] = {
+            "state": "none",
+            "partner_id": None,
+            "chat_id": None,
+            "username": username,
+            "gender": None,
+            "age": None,
+            "search_gender": 'any',
+            "last_filter": 'any',
+            "rep": 0  # КРУТОЕ: Система репутации
+        }
 
-def get_username(uid: int) -> str:
-    return users.get(uid, {}).get('username', str(uid))
-
-def gender_emoji(g: str) -> str:
-    if g == 'male':
-        return '🚹'
-    if g == 'female':
-        return '🚺'
+def gender_emoji(g):
+    if g == 'male': return '🚹'
+    if g == 'female': return '🚺'
     return '⚧'
 
-def partner_info(uid: int) -> str:
+def partner_info(uid):
     u = users.get(uid, {})
     g = u.get('gender')
     a = u.get('age')
+    rep = u.get('rep', 0)
     parts = []
     if g:
         parts.append(f"Пол: {gender_emoji(g)} {'мужской' if g=='male' else 'женский'}")
     if a is not None:
         parts.append(f"Возраст: {a}")
-    if not parts:
-        return "Профиль не заполнен"
-    return ', '.join(parts)
+    parts.append(f"⭐️ Репутация: {rep}")
+    return '\n'.join(parts)
 
 # ==============================================
-# ИГРА КРЕСТИКИ-НОЛИКИ (БЕЗ ЮЗЕРНЕЙМОВ)
+# ИГРА КРЕСТИКИ-НОЛИКИ
 # ==============================================
 
-WIN_COMBOS = [
-    [0,1,2], [3,4,5], [6,7,8],
-    [0,3,6], [1,4,7], [2,5,8],
-    [0,4,8], [2,4,6]
-]
+WIN_COMBOS = [[0,1,2], [3,4,5], [6,7,8], [0,3,6], [1,4,7], [2,5,8], [0,4,8], [2,4,6]]
 
 def create_game_board():
     return [' ' for _ in range(9)]
@@ -91,13 +94,13 @@ def board_to_keyboard(board, active=True):
         for j in range(3):
             idx = i + j
             cell = board[idx]
-            if cell == 'X':
-                text = '❌'
-            elif cell == 'O':
-                text = '⭕'
-            else:
-                text = '▫️'
-            row.append(telebot.types.InlineKeyboardButton(text=text, callback_data=f"cell_{idx}" if active else "none"))
+            if cell == 'X': text = '❌'
+            elif cell == 'O': text = '⭕'
+            else: text = '▫️'
+            row.append(telebot.types.InlineKeyboardButton(
+                text=text,
+                callback_data=f"cell_{idx}" if active else "none"
+            ))
         markup.add(*row)
     return markup
 
@@ -113,167 +116,79 @@ def board_full(board):
 def end_game(chat_id, winner_id=None):
     if chat_id in games:
         g = games.pop(chat_id)
-        if winner_id:
-            text = "🏆 Победил один из игроков!"
-        else:
-            text = "🤝 Ничья!"
-        try:
-            bot.edit_message_text(
-                f"Игра окончена!\n{text}",
-                chat_id=g['player1'],
-                message_id=g['msg1_id']
-            )
-        except:
-            pass
-        try:
-            bot.edit_message_text(
-                f"Игра окончена!\n{text}",
-                chat_id=g['player2'],
-                message_id=g['msg2_id']
-            )
-        except:
-            pass
+        text = f"🏆 Победил один из игроков!" if winner_id else "🤝 Ничья!"
+        for pid, mid in [(g['player1'], g['msg1_id']), (g['player2'], g['msg2_id'])]:
+            try: bot.edit_message_text(f"Игра окончена!\n{text}", chat_id=pid, message_id=mid)
+            except: pass
 
 # ==============================================
-# ОСНОВНЫЕ ФУНКЦИИ
+# ОСНОВНЫЕ ФУНКЦИИ БОТА
 # ==============================================
 
-def send_welcome(message: Message):
+def send_welcome(message):
     uid = message.from_user.id
-    username = message.from_user.username or str(uid)
-    users[uid] = {
-        "state": "none",
-        "partner_id": None,
-        "chat_id": None,
-        "username": username,
-        "gender": None,
-        "age": None,
-        "search_gender": 'any',
-        "last_filter": 'any'
-    }
+    init_user(uid, message.from_user.username)
     bot.send_message(
         message.chat.id,
-        "🔥 *DARK CHAT* 🔥\n\n"
-        "Абсолютная свобода общения.\n"
-        "Без цензуры, без банов – можно всё!\n\n"
+        "🔥 *DARK CHAT — СУПЕР СКОРОСТЬ* 🔥\n\n"
+        "Абсолютная свобода общения без цензуры!\n"
+        "Работает 24/7 без задержек.\n\n"
         "👤 *Создатель: Белый Дарон*\n\n"
-        "📌 Основные команды:\n"
-        "/find – найти собеседника (с фильтром)\n"
-        "/leave – выйти из чата\n"
-        "/next – сменить собеседника\n"
-        "/profile – твой профиль\n"
-        "/setgender – указать пол\n"
-        "/setage – указать возраст\n"
-        "/help – помощь\n"
-        "/game – сыграть в крестики-нолики",
+        "📌 *Команды управления:* \n"
+        "➕ `/find` – найти собеседника\n"
+        "⏭ `/next` – следующий чат\n"
+        "🚪 `/leave` – выйти из чата\n\n"
+        "👤 *Профиль и фичи:* \n"
+        "ℹ️ `/profile` – твой профиль и карма\n"
+        "⚧ `/setgender` [male/female/none]\n"
+        "🎂 `/setage` [возраст]\n\n"
+        "🎉 *Интерактив в чате:* \n"
+        "🎮 `/game` – сыграть в Крестики-Нолики\n"
+        "🎲 `/dice` – бросить кубик анонимно\n"
+        "👍 `/like` / 👎 `/dislike` – оценить собеседника",
         parse_mode='Markdown'
     )
 
-def show_help(message: Message):
-    bot.send_message(
-        message.chat.id,
-        "📋 *Команды DARK CHAT:*\n\n"
-        "/find – поиск собеседника (с выбором пола)\n"
-        "/leave – выйти из чата\n"
-        "/next – выйти и сразу искать нового\n"
-        "/profile – просмотр профиля\n"
-        "/setgender [male/female/none] – указать пол\n"
-        "/setage [число] – указать возраст\n"
-        "/game – предложить игру в крестики-нолики\n"
-        "/stopgame – завершить игру\n"
-        "/help – эта справка\n\n"
-        "💬 Всё анонимно. Без регистрации.\n"
-        "🔞 Никаких запретов – контент 18+ разрешён.\n\n"
-        "👤 Создатель: Белый Дарон",
-        parse_mode='Markdown'
-    )
-
-def show_profile(uid: int, chat_id: int):
-    u = users.get(uid)
-    if not u:
-        bot.send_message(chat_id, "Сначала используй /start")
-        return
+def show_profile(uid, chat_id):
+    init_user(uid)
+    u = users[uid]
     g = u.get('gender')
-    a = u.get('age')
     gender_display = 'не указан' if not g else ('мужской' if g=='male' else 'женский')
-    age_display = 'не указан' if a is None else str(a)
-    text = (
+    bot.send_message(
+        chat_id,
         f"👤 *Твой профиль*\n"
-        f"ID: `{uid}`\n"
-        f"Пол: {gender_emoji(g) if g else '⚧'} {gender_display}\n"
-        f"Возраст: {age_display}\n"
-        f"Последний фильтр поиска: {u.get('last_filter','any')}\n\n"
-        "Изменить: /setgender /setage"
+        f"🆔 ID: `{uid}`\n"
+        f"⚧ Пол: {gender_display}\n"
+        f"🎂 Возраст: {u.get('age', 'не указан')}\n"
+        f"⭐️ Репутация: *{u.get('rep', 0)}* пунктов\n"
+        f"🔍 Последний фильтр поиска: {u.get('last_filter','any')}",
+        parse_mode='Markdown'
     )
-    bot.send_message(chat_id, text, parse_mode='Markdown')
 
-def set_gender(message: Message):
+def start_find(message):
     uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
-        return
-    parts = message.text.strip().split()
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "Используй: /setgender male / female / none")
-        return
-    val = parts[1].lower()
-    if val in ('male', 'м'):
-        users[uid]['gender'] = 'male'
-        bot.send_message(message.chat.id, "✅ Пол установлен: мужской 🚹")
-    elif val in ('female', 'ж'):
-        users[uid]['gender'] = 'female'
-        bot.send_message(message.chat.id, "✅ Пол установлен: женский 🚺")
-    elif val == 'none':
-        users[uid]['gender'] = None
-        bot.send_message(message.chat.id, "✅ Пол скрыт")
-    else:
-        bot.send_message(message.chat.id, "Неверно. Допустимо: male, female, none")
-
-def set_age(message: Message):
-    uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
-        return
-    parts = message.text.strip().split()
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "Используй: /setage 25")
-        return
-    try:
-        age = int(parts[1])
-        if age < 1 or age > 150:
-            raise ValueError
-        users[uid]['age'] = age
-        bot.send_message(message.chat.id, f"✅ Возраст установлен: {age}")
-    except:
-        bot.send_message(message.chat.id, "Укажи число от 1 до 150")
-
-def start_find(message: Message):
-    uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
-        return
+    init_user(uid)
     if users[uid]['state'] != 'none':
-        bot.send_message(message.chat.id, "❌ Ты уже в чате или в поиске. Сначала /leave")
+        bot.send_message(message.chat.id, "❌ Сначала выйдите из текущего диалога: /leave")
         return
-    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    markup = telebot.types.InlineKeyboardMarkup(row_width=3)
     markup.add(
-        telebot.types.InlineKeyboardButton("🚹 Мужчин", callback_data="search_male"),
-        telebot.types.InlineKeyboardButton("🚺 Женщин", callback_data="search_female"),
-        telebot.types.InlineKeyboardButton("⚧ Без разницы", callback_data="search_any")
+        telebot.types.InlineKeyboardButton("🚹 Парня", callback_data="search_male"),
+        telebot.types.InlineKeyboardButton("🚺 Девушку", callback_data="search_female"),
+        telebot.types.InlineKeyboardButton("⚧ Любого", callback_data="search_any")
     )
-    bot.send_message(message.chat.id, "Кого ищем?", reply_markup=markup)
+    bot.send_message(message.chat.id, "✨ Кого вы хотите найти?", reply_markup=markup)
 
-def find_partner(uid: int, search_gender: str, message: Message = None):
-    if uid not in users or users[uid]['state'] != 'none':
-        if message:
-            bot.send_message(message.chat.id, "❌ Нельзя начать поиск сейчас")
-        return
+def find_partner(uid, search_gender, message=None):
+    init_user(uid)
+    if users[uid]['state'] != 'none': return
     users[uid]['state'] = 'waiting'
     users[uid]['search_gender'] = search_gender
     users[uid]['last_filter'] = search_gender
-    waiting_list.append(uid)
+    if uid not in waiting_list:
+        waiting_list.append(uid)
     if message:
-        bot.send_message(message.chat.id, "🔍 Ищем собеседника...")
+        bot.send_message(message.chat.id, "🔍 Поиск запущен... Ищем свободного собеседника...")
     try_find_pair()
 
 def try_find_pair():
@@ -286,383 +201,243 @@ def try_find_pair():
         found = -1
         for j in range(i+1, len(waiting_list)):
             uid2 = waiting_list[j]
-            if uid2 not in users or users[uid2]['state'] != 'waiting':
-                continue
+            if uid2 not in users or users[uid2]['state'] != 'waiting': continue
+            
             sg1 = users[uid1].get('search_gender', 'any')
             sg2 = users[uid2].get('search_gender', 'any')
             gender1 = users[uid1].get('gender')
             gender2 = users[uid2].get('gender')
-            ok1 = (sg1 == 'any') or (gender2 == sg1)
-            ok2 = (sg2 == 'any') or (gender1 == sg2)
-            if ok1 and ok2:
+            
+            if (sg1 == 'any' or gender2 == sg1) and (sg2 == 'any' or gender1 == sg2):
                 found = j
                 break
         if found != -1:
             uid2 = waiting_list.pop(found)
             uid1 = waiting_list.pop(i)
             chat_id = f"{uid1}_{uid2}_{int(time.time())}"
-            chats[chat_id] = {
-                "user1": uid1,
-                "user2": uid2,
-                "created_at": time.time()
-            }
+            chats[chat_id] = {"user1": uid1, "user2": uid2}
             users[uid1].update({"state": "chatting", "partner_id": uid2, "chat_id": chat_id})
             users[uid2].update({"state": "chatting", "partner_id": uid1, "chat_id": chat_id})
-            info1 = partner_info(uid2)
-            info2 = partner_info(uid1)
-            bot.send_message(uid1,
-                f"💬 *Собеседник найден!*\n{info1}\nНачинайте общение.",
-                parse_mode='Markdown')
-            bot.send_message(uid2,
-                f"💬 *Собеседник найден!*\n{info2}\nНачинайте общение.",
-                parse_mode='Markdown')
+            
+            bot.send_message(uid1, f"🎉 *Собеседник найден!*\n\n{partner_info(uid2)}\n\n✍️ Пишите сообщение...", parse_mode='Markdown')
+            bot.send_message(uid2, f"🎉 *Собеседник найден!*\n\n{partner_info(uid1)}\n\n✍️ Пишите сообщение...", parse_mode='Markdown')
         else:
             i += 1
 
-def leave_chat(message: Message):
+def leave_chat(message):
     uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
-        return
+    if uid not in users: return
     state = users[uid]['state']
     if state == 'none':
-        bot.send_message(message.chat.id, "❌ Ты не в чате")
+        bot.send_message(message.chat.id, "❌ Вы сейчас не находитесь в поиске или чате.")
         return
     chat_id = users[uid].get('chat_id')
-    if chat_id and chat_id in games:
-        end_game(chat_id)
+    if chat_id and chat_id in games: end_game(chat_id)
+    
     if state == 'waiting':
-        if uid in waiting_list:
-            waiting_list.remove(uid)
+        if uid in waiting_list: waiting_list.remove(uid)
         users[uid]['state'] = 'none'
-        bot.send_message(message.chat.id, "🔎 Поиск остановлен")
+        bot.send_message(message.chat.id, "🔎 Поиск остановлен.")
         return
+        
     partner_id = users[uid]['partner_id']
-    users[uid]['state'] = 'none'
-    users[uid]['partner_id'] = None
-    users[uid]['chat_id'] = None
-    bot.send_message(message.chat.id, "✅ Ты вышел из чата")
-    if partner_id in users and users[partner_id]['state'] == 'chatting':
-        bot.send_message(partner_id, "❌ Собеседник покинул чат")
-        users[partner_id]['state'] = 'none'
-        users[partner_id]['partner_id'] = None
-        users[partner_id]['chat_id'] = None
-        p_chat_id = users[partner_id].get('chat_id')
-        if p_chat_id in games:
-            end_game(p_chat_id)
+    for usr in [uid, partner_id]:
+        if usr in users:
+            users[usr].update({"state": "none", "partner_id": None, "chat_id": None})
+    bot.send_message(message.chat.id, "🚪 Вы покинули чат.")
+    bot.send_message(partner_id, "❌ Собеседник отключился от чата.")
 
-def next_partner(message: Message):
+def handle_rate(message, rate_type):
     uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
+    if uid not in users or users[uid]['state'] != 'chatting':
+        bot.send_message(message.chat.id, "❌ Оценивать можно только в чате!")
         return
-    if users[uid]['state'] == 'chatting':
-        leave_chat(message)
-    elif users[uid]['state'] == 'waiting':
-        if uid in waiting_list:
-            waiting_list.remove(uid)
-        users[uid]['state'] = 'none'
-    last = users[uid].get('last_filter', 'any')
-    find_partner(uid, last, message)
+    pid = users[uid]['partner_id']
+    init_user(pid)
+    if rate_type == 'like':
+        users[pid]['rep'] += 1
+        bot.send_message(message.chat.id, "👍 Вы поставили лайк собеседнику!")
+        bot.send_message(pid, "🔥 Кто-то оценил вас положительно! Ваша репутация выросла.")
+    else:
+        users[pid]['rep'] -= 1
+        bot.send_message(message.chat.id, "👎 Вы поставили дизлайк.")
 
-def forward_message(message: Message):
+def forward_message(message):
     uid = message.from_user.id
     u = users.get(uid)
-    if not u or u['state'] != 'chatting' or u['partner_id'] not in users:
-        bot.send_message(message.chat.id, "❌ Собеседник покинул чат")
-        if uid in users:
-            users[uid]['state'] = 'none'
-        return
-    partner_id = u['partner_id']
-    chat_id = u['chat_id']
-    content = None
-    if message.content_type == 'text':
-        content = message.text
-    else:
-        if message.content_type == 'photo':
-            content = message.photo[-1].file_id
-        elif message.content_type == 'video':
-            content = message.video.file_id
-        elif message.content_type == 'document':
-            content = message.document.file_id
-        elif message.content_type == 'audio':
-            content = message.audio.file_id
-        elif message.content_type == 'voice':
-            content = message.voice.file_id
-        elif message.content_type == 'sticker':
-            content = message.sticker.file_id
-        else:
-            return
-    chat_messages[chat_id].append({
-        "sender": uid,
-        "type": message.content_type,
-        "content": content,
-        "timestamp": time.time()
-    })
+    if not u or u['state'] != 'chatting': return
+    pid = u['partner_id']
     try:
-        if message.content_type == 'text':
-            bot.send_message(partner_id, f"💬 *Новое сообщение:*\n{message.text}", parse_mode='Markdown')
-        elif message.content_type == 'photo':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (фото)", parse_mode='Markdown')
-            bot.send_photo(partner_id, message.photo[-1].file_id)
-        elif message.content_type == 'video':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (видео)", parse_mode='Markdown')
-            bot.send_video(partner_id, message.video.file_id)
-        elif message.content_type == 'document':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (документ)", parse_mode='Markdown')
-            bot.send_document(partner_id, message.document.file_id)
-        elif message.content_type == 'audio':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (аудио)", parse_mode='Markdown')
-            bot.send_audio(partner_id, message.audio.file_id)
-        elif message.content_type == 'voice':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (голосовое)", parse_mode='Markdown')
-            bot.send_voice(partner_id, message.voice.file_id)
-        elif message.content_type == 'sticker':
-            bot.send_message(partner_id, "💬 *Новое сообщение:* (стикер)", parse_mode='Markdown')
-            bot.send_sticker(partner_id, message.sticker.file_id)
-    except Exception as e:
-        print(f"Ошибка пересылки: {e}")
-        bot.send_message(uid, "❌ Собеседник покинул чат")
-        leave_chat(message)
-
-def handle_game_command(message: Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['state'] != 'chatting':
-        bot.send_message(message.chat.id, "❌ Нужно находиться в чате, чтобы предложить игру")
-        return
-    partner_id = users[uid]['partner_id']
-    chat_id = users[uid]['chat_id']
-    if chat_id in games:
-        bot.send_message(message.chat.id, "🎮 Игра уже идёт!")
-        return
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.add(
-        telebot.types.InlineKeyboardButton("✅ Принять", callback_data=f"game_accept_{uid}"),
-        telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"game_decline_{uid}")
-    )
-    bot.send_message(partner_id,
-        f"🎲 Собеседник предлагает сыграть в крестики-нолики!",
-        reply_markup=markup)
-    bot.send_message(uid, "⌛ Ожидаем ответа собеседника...")
-    games[chat_id] = {'status': 'pending', 'from': uid, 'to': partner_id}
-
-def stop_game_command(message: Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['state'] != 'chatting':
-        bot.send_message(message.chat.id, "❌ Ты не в чате")
-        return
-    chat_id = users[uid].get('chat_id')
-    if chat_id not in games:
-        bot.send_message(message.chat.id, "🎮 Нет активной игры")
-        return
-    end_game(chat_id)
-    bot.send_message(message.chat.id, "🛑 Игра завершена")
-
-def start_game(chat_id, player1, player2):
-    board = create_game_board()
-    games[chat_id] = {
-        'status': 'active',
-        'board': board,
-        'player1': player1,
-        'player2': player2,
-        'current_turn': player1,
-        'msg1_id': None,
-        'msg2_id': None
-    }
-    markup = board_to_keyboard(board)
-    m1 = bot.send_message(player1, "🎮 Крестики-нолики\nТвой ход!", reply_markup=markup)
-    m2 = bot.send_message(player2, "🎮 Крестики-нолики\nХод соперника!", reply_markup=markup)
-    games[chat_id]['msg1_id'] = m1.message_id
-    games[chat_id]['msg2_id'] = m2.message_id
+        if message.content_type == 'text': bot.send_message(pid, message.text)
+        elif message.content_type == 'photo': bot.send_photo(pid, message.photo[-1].file_id, caption=message.caption)
+        elif message.content_type == 'video': bot.send_video(pid, message.video.file_id, caption=message.caption)
+        elif message.content_type == 'sticker': bot.send_sticker(pid, message.sticker.file_id)
+        elif message.content_type == 'voice': bot.send_voice(pid, message.voice.file_id)
+        elif message.content_type == 'audio': bot.send_audio(pid, message.audio.file_id, caption=message.caption)
+        elif message.content_type == 'dice': bot.send_dice(pid, emoji=message.dice.emoji)
+    except:
+        bot.send_message(uid, "❌ Ошибка отправки медиа.")
 
 # ==============================================
 # ОБРАБОТЧИКИ КОМАНД
 # ==============================================
 
-@bot.message_handler(commands=['start', 'help', 'find', 'leave', 'next', 'profile', 'setgender', 'setage', 'game', 'stopgame'])
-def handle_commands(message: Message):
+@bot.message_handler(commands=['start', 'help', 'find', 'leave', 'next', 'profile', 'like', 'dislike', 'dice', 'game', 'stopgame'])
+def commands_router(message):
     cmd = message.text.split()[0].lower()
-    if cmd == '/start':
-        send_welcome(message)
-    elif cmd == '/help':
-        show_help(message)
-    elif cmd == '/find':
-        start_find(message)
-    elif cmd == '/leave':
-        leave_chat(message)
+    uid = message.from_user.id
+    
+    if cmd == '/start' or cmd == '/help': send_welcome(message)
+    elif cmd == '/find': start_find(message)
+    elif cmd == '/leave': leave_chat(message)
     elif cmd == '/next':
-        next_partner(message)
-    elif cmd == '/profile':
-        show_profile(message.from_user.id, message.chat.id)
-    elif cmd == '/setgender':
-        set_gender(message)
-    elif cmd == '/setage':
-        set_age(message)
+        if uid in users and users[uid]['state'] == 'chatting': leave_chat(message)
+        elif uid in users and users[uid]['state'] == 'waiting':
+            if uid in waiting_list: waiting_list.remove(uid)
+            users[uid]['state'] = 'none'
+        init_user(uid)
+        find_partner(uid, users[uid].get('last_filter', 'any'), message)
+    elif cmd == '/profile': show_profile(uid, message.chat.id)
+    elif cmd == '/like': handle_rate(message, 'like')
+    elif cmd == '/dislike': handle_rate(message, 'dislike')
+    elif cmd == '/dice':
+        if uid in users and users[uid]['state'] == 'chatting':
+            m = bot.send_dice(message.chat.id)
+            bot.send_dice(users[uid]['partner_id'])
+        else:
+            bot.send_message(message.chat.id, "❌ Бросать кубик можно только в активном чате!")
     elif cmd == '/game':
-        handle_game_command(message)
+        if uid not in users or users[uid]['state'] != 'chatting':
+            bot.send_message(message.chat.id, "❌ Начать игру можно только находясь в чате.")
+            return
+        chat_id = users[uid]['chat_id']
+        if chat_id in games: return
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(telebot.types.InlineKeyboardButton("✅ Играем!", callback_data=f"g_a_{uid}"),
+                   telebot.types.InlineKeyboardButton("❌ Отказ", callback_data=f"g_d_{uid}"))
+        bot.send_message(users[uid]['partner_id'], "🎲 Собеседник зовет вас играть в Крестики-Нолики!", reply_markup=markup)
+        bot.send_message(uid, "⏳ Ждем ответа оппонента...")
+        games[chat_id] = {'status': 'pending', 'from': uid, 'to': users[uid]['partner_id']}
     elif cmd == '/stopgame':
-        stop_game_command(message)
+        if uid in users and users[uid].get('chat_id') in games:
+            end_game(users[uid]['chat_id'])
+            bot.send_message(message.chat.id, "🛑 Игра остановлена.")
+
+@bot.message_handler(commands=['setgender', 'setage'])
+def settings_handler(message):
+    uid = message.from_user.id
+    init_user(uid)
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, f"Использование команды: {parts[0]} [значение]")
+        return
+    val = parts[1].lower()
+    if parts[0] == '/setgender':
+        if val in ('male', 'м'): users[uid]['gender'] = 'male'
+        elif val in ('female', 'ж'): users[uid]['gender'] = 'female'
+        else: users[uid]['gender'] = None
+        bot.send_message(message.chat.id, "✅ Пол успешно обновлен.")
+    elif parts[0] == '/setage':
+        try:
+            age = int(val)
+            if 1 <= age <= 100:
+                users[uid]['age'] = age
+                bot.send_message(message.chat.id, f"✅ Возраст изменен на {age}")
+            else: raise ValueError
+        except: bot.send_message(message.chat.id, "❌ Неверный формат возраста.")
+
+# ==============================================
+# КОЛБЭКИ И ИНЛАЙН-КНОПКИ
+# ==============================================
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
+def callback_router(call):
     uid = call.from_user.id
     data = call.data
-
+    
     if data.startswith('search_'):
         gender = data.split('_')[1]
-        if uid not in users or users[uid]['state'] != 'none':
-            bot.answer_callback_query(call.id, "Недоступно сейчас")
-            return
-        bot.answer_callback_query(call.id, "Запускаем поиск")
-        try:
-            bot.edit_message_text(
-                f"Поиск: {gender}",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id
-            )
-        except:
-            pass
+        init_user(uid)
+        if users[uid]['state'] != 'none': return
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
         find_partner(uid, gender, call.message)
-        return
+        
+    elif data.startswith('g_a_'): # Принять игру
+        init_user(uid)
+        cid = users[uid].get('chat_id')
+        if cid in games and games[cid]['status'] == 'pending' and games[cid]['to'] == uid:
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+            p1, p2 = games[cid]['from'], uid
+            board = create_game_board()
+            games[cid] = {'status': 'active', 'board': board, 'player1': p1, 'player2': p2, 'current_turn': p1}
+            markup = board_to_keyboard(board)
+            m1 = bot.send_message(p1, "🎮 Твой ход! (Вы ходите Крестиками)", reply_markup=markup)
+            m2 = bot.send_message(p2, "🎮 Ожидание хода противника...", reply_markup=markup)
+            games[cid]['msg1_id'] = m1.message_id
+            games[cid]['msg2_id'] = m2.message_id
 
-    if data.startswith('game_accept_'):
-        try:
-            initiator_id = int(data.split('_')[2])
-        except:
-            bot.answer_callback_query(call.id, "Ошибка")
-            return
-        if uid not in users or users[uid]['state'] != 'chatting':
-            bot.answer_callback_query(call.id, "Ты не в чате")
-            return
-        chat_id = users[uid].get('chat_id')
-        if chat_id not in games or games[chat_id].get('status') != 'pending':
-            bot.answer_callback_query(call.id, "Запрос устарел")
-            return
-        game = games[chat_id]
-        if game['to'] != uid:
-            bot.answer_callback_query(call.id, "Не тебе предложили")
-            return
-        bot.answer_callback_query(call.id, "Игра началась!")
-        try:
-            bot.edit_message_text(
-                "🎮 Игра начинается!",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id
-            )
-        except:
-            pass
-        start_game(chat_id, initiator_id, uid)
-        return
+    elif data.startswith('g_d_'): # Отклонить игру
+        cid = users.get(uid, {}).get('chat_id')
+        if cid in games:
+            p1 = games[cid]['from']
+            del games[cid]
+            try: bot.edit_message_text("❌ Приглашение отклонено.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+            except: pass
+            bot.send_message(p1, "❌ Собеседник отклонил приглашение к игре.")
 
-    if data.startswith('game_decline_'):
-        try:
-            initiator_id = int(data.split('_')[2])
-        except:
+    elif data.startswith('cell_'):
+        cid = users.get(uid, {}).get('chat_id')
+        if cid not in games or games[cid]['status'] != 'active' or games[cid]['current_turn'] != uid:
+            bot.answer_callback_query(call.id, "Сейчас не ваш ход!")
             return
-        if uid not in users or users[uid]['state'] != 'chatting':
-            return
-        chat_id = users[uid].get('chat_id')
-        if chat_id in games and games[chat_id].get('status') == 'pending':
-            del games[chat_id]
-            bot.answer_callback_query(call.id, "Отклонено")
-            try:
-                bot.edit_message_text(
-                    "❌ Предложение отклонено",
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id
-                )
-            except:
-                pass
-            bot.send_message(initiator_id, "❌ Собеседник отказался от игры")
-        return
-
-    if data.startswith('cell_'):
-        if uid not in users or users[uid]['state'] != 'chatting':
-            bot.answer_callback_query(call.id, "Не в чате")
-            return
-        chat_id = users[uid].get('chat_id')
-        if chat_id not in games or games[chat_id].get('status') != 'active':
-            bot.answer_callback_query(call.id, "Игра неактивна")
-            return
-        game = games[chat_id]
-        if game['current_turn'] != uid:
-            bot.answer_callback_query(call.id, "Не твой ход!")
-            return
+        game = games[cid]
         idx = int(data.split('_')[1])
-        if game['board'][idx] != ' ':
-            bot.answer_callback_query(call.id, "Клетка занята")
-            return
+        if game['board'][idx] != ' ': return
+        
         symbol = 'X' if uid == game['player1'] else 'O'
         game['board'][idx] = symbol
         winner = check_winner(game['board'])
+        
         if winner or board_full(game['board']):
-            win_id = None
-            if winner == 'X':
-                win_id = game['player1']
-            elif winner == 'O':
-                win_id = game['player2']
             markup = board_to_keyboard(game['board'], active=False)
-            msg1_text = f"🎮 Игра (завершена)\n{'🏆 Победил один из игроков!' if win_id else '🤝 Ничья!'}"
-            msg2_text = msg1_text
-            try:
-                bot.edit_message_text(msg1_text,
-                    chat_id=game['player1'], message_id=game['msg1_id'],
-                    reply_markup=markup)
-            except:
-                pass
-            try:
-                bot.edit_message_text(msg2_text,
-                    chat_id=game['player2'], message_id=game['msg2_id'],
-                    reply_markup=markup)
-            except:
-                pass
-            del games[chat_id]
+            res_txt = "🎮 Игра завершена! " + ("🏆 Вы победили!" if winner else "🤝 Ничья!")
+            opp_txt = "🎮 Игра завершена! " + ("💀 Вы проиграли." if winner else "🤝 Ничья!")
+            bot.send_message(uid, res_txt)
+            bot.send_message(game['player2'] if uid == game['player1'] else game['player1'], opp_txt)
+            end_game(cid)
         else:
             game['current_turn'] = game['player2'] if uid == game['player1'] else game['player1']
             markup = board_to_keyboard(game['board'])
             for pid, mid in [(game['player1'], game['msg1_id']), (game['player2'], game['msg2_id'])]:
-                txt = "🎮 Крестики-нолики\nХод соперника!" if pid != game['current_turn'] else "🎮 Твой ход!"
-                try:
-                    bot.edit_message_text(txt,
-                        chat_id=pid, message_id=mid,
-                        reply_markup=markup)
-                except:
-                    pass
-        bot.answer_callback_query(call.id, "Ход сделан")
-        return
-
-    bot.answer_callback_query(call.id, "Неизвестная команда")
+                txt = "🎮 Ваш ход!" if pid == game['current_turn'] else "🎮 Ожидание хода противника..."
+                try: bot.edit_message_text(txt, chat_id=pid, message_id=mid, reply_markup=markup)
+                except: pass
+        bot.answer_callback_query(call.id)
 
 # ==============================================
-# ПЕРЕСЫЛКА СООБЩЕНИЙ
+# ОБРАБОТКА ЛЮБЫХ СООБЩЕНИЙ
 # ==============================================
 
-@bot.message_handler(content_types=['text'])
-def handle_text(message: Message):
+@bot.message_handler(content_types=['text', 'photo', 'video', 'sticker', 'voice', 'audio', 'dice'])
+def global_message_handler(message):
     uid = message.from_user.id
-    if uid not in users:
-        send_welcome(message)
+    if uid not in users or users[uid]['state'] == 'none':
+        bot.send_message(message.chat.id, "ℹ️ Напишите `/find`, чтобы найти тайного собеседника.", parse_mode='Markdown')
         return
-    if users[uid]['state'] != 'chatting':
-        bot.send_message(message.chat.id, "ℹ️ Используй /find для поиска собеседника")
-        return
-    forward_message(message)
-
-@bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'voice', 'sticker'])
-def handle_media(message: Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['state'] != 'chatting':
+    if users[uid]['state'] == 'waiting':
+        bot.send_message(message.chat.id, "⏳ Секунду, мы всё ещё ищем пару. Наберитесь терпения или используйте `/leave`.")
         return
     forward_message(message)
 
 # ==============================================
-# ЗАПУСК
+# ЗАПУСК И СТАБИЛИЗАЦИЯ ПОД ТЕРМУКС / RENDER
 # ==============================================
 
 if __name__ == '__main__':
-    print("🔥 DARK CHAT ЗАПУЩЕН! 🔥")
-    print("👤 Создатель: Белый Дарон")
-    print("📅", datetime.now())
-    print("🔄 Автопинг активен (каждые 5 минут)")
+    print("🚀 СКОРОСТНОЙ АНОНИМНЫЙ ЧАТ ЗАПУЩЕН!")
+    print("⚡ Режим infinity_polling включен (защита от падений и пинги активны)")
     bot.remove_webhook()
-    bot.infinity_polling()
+    # long_polling_timeout держит соединение открытым и моментально обрабатывает входящие апдейты без задержек
+    bot.infinity_polling(timeout=60, long_polling_timeout=5)
